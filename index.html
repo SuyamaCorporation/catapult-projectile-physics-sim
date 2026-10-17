@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Catapult Projectile Physics Simulation</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-950 text-white min-h-screen">
+<script>
+function escapeHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+
+const g=9.81; // m/s²
+
+// Weapon presets
+const WEAPONS={
+  catapult:{name:'Catapult',color:'#f97316',defaultAngle:45,defaultV:35,defaultMass:5,desc:'Siege engine with counter-weight, low-angle high-velocity throws'},
+  trebuchet:{name:'Trebuchet',color:'#a855f7',defaultAngle:45,defaultV:50,defaultMass:10,desc:'Long-arm trebuchet, optimal 45° launch, high range'},
+  ballista:{name:'Ballista',color:'#22d3ee',defaultAngle:15,defaultV:70,defaultMass:2,desc:'Bolt-throwing ballista, flat trajectory, high velocity'}
+};
+
+let weaponType='catapult';
+let angle=45, initV=35, mass=5, useDrag=false;
+let trajectories=[]; // [{points, color, label, stats}]
+let animating=false, animId=null;
+let animTraj=null, animT=0, animDt=0.016;
+let showComparison=false;
+let showGraph=false;
+
+function computeTrajectory(angleDeg, v0, massKg, drag, dt=0.01){
+  const a=angleDeg*Math.PI/180;
+  let vx=v0*Math.cos(a), vy=v0*Math.sin(a);
+  let x=0, y=0;
+  const pts=[{x,y}];
+  let maxH=0, t=0;
+  const rho=1.225, Cd=0.47, A=0.04; // air drag constants
+  const kDrag=0.5*rho*Cd*A;
+
+  while(y>=0||t<0.01){
+    t+=dt;
+    if(drag){
+      const v=Math.sqrt(vx*vx+vy*vy);
+      const Fd=kDrag*v*v/massKg;
+      vx-=Fd*vx/v*dt;
+      vy-=(g+Fd*vy/v)*dt;
+    } else {
+      vy-=g*dt;
+    }
+    x+=vx*dt; y+=vy*dt;
+    if(y>maxH) maxH=y;
+    if(y<0) break;
+    pts.push({x,y});
+    if(x>10000) break; // safety
+  }
+  const range=x+vx*Math.abs(y/vy); // interpolate landing
+  return {pts, range:Math.max(0,range.toFixed(1)-0), maxH:maxH.toFixed(1)-0, tof:t.toFixed(2)-0};
+}
+
+function launch(){
+  cancelAnimationFrame(animId);
+  const w=WEAPONS[weaponType];
+  const result=computeTrajectory(angle, initV, mass, useDrag);
+  animTraj=result;
+  animT=0;
+  animating=true;
+  const color=w.color;
+  trajectories=[{...result, color, label:`${escapeHtml(w.name)} ${angle}°`, weaponType}];
+  animLoop();
+  updateStats(result);
+}
+
+function launchComparison(){
+  cancelAnimationFrame(animId);
+  animating=false;
+  const angles=[15,30,45,60,75];
+  const w=WEAPONS[weaponType];
+  const colors=['#ef4444','#f97316','#22c55e','#3b82f6','#a855f7'];
+  trajectories=angles.map((a,i)=>{
+    const r=computeTrajectory(a,initV,mass,useDrag);
+    return {...r,color:colors[i],label:`${a}°`,weaponType};
+  });
+  drawAll();
+  updateStats(trajectories[2]); // 45° result
+}
+
+function animLoop(){
+  if(!animating) return;
+  animT+=animDt*60;
+  drawAll(animT);
+  if(animT>=animTraj.pts.length-1){ animating=false; drawAll(); return; }
+  animId=requestAnimationFrame(animLoop);
+}
+
+function drawAll(animProgress=Infinity){
+  const canvas=document.getElementById('cvs');
+  if(!canvas) return;
+  const ctx=canvas.getContext('2d');
+  const W=canvas.width, H=canvas.height;
+  ctx.clearRect(0,0,W,H);
+
+  // Sky gradient
+  const sky=ctx.createLinearGradient(0,0,0,H);
+  sky.addColorStop(0,'#0c1445');
+  sky.addColorStop(1,'#1a3a2a');
+  ctx.fillStyle=sky; ctx.fillRect(0,0,W,H);
+
+  // Ground
+  ctx.fillStyle='#3d5a2a';
+  ctx.fillRect(0,H-30,W,30);
+  ctx.fillStyle='#2d4a1a';
+  ctx.fillRect(0,H-30,W,4);
+
+  if(trajectories.length===0){ drawCatapult(ctx,W,H); return; }
+
+  // Find max range and height for scaling
+  const maxRange=Math.max(...trajectories.map(t=>t.range),10);
+  const maxH=Math.max(...trajectories.map(t=>t.maxH),10);
+  const ground=H-30;
+  const launchX=60;
+  const scaleX=(W-launchX-30)/maxRange;
+  const scaleY=(ground-20)/Math.max(maxH*1.1,1);
+
+  // Draw all trajectories
+  trajectories.forEach((traj,ti)=>{
+    const pts=traj.pts;
+    const drawLimit=ti===0&&animProgress<Infinity?Math.floor(animProgress):pts.length;
+    ctx.beginPath();
+    ctx.strokeStyle=traj.color;
+    ctx.lineWidth=2;
+    ctx.setLineDash([]);
+    pts.slice(0,drawLimit).forEach((p,i)=>{
+      const px=launchX+p.x*scaleX;
+      const py=ground-p.y*scaleY;
+      if(i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+    });
+    ctx.stroke();
+
+    // Landing marker
+    if(drawLimit>=pts.length-1){
+      const lx=launchX+traj.range*scaleX;
+      ctx.beginPath(); ctx.arc(lx,ground,5,0,Math.PI*2);
+      ctx.fillStyle=traj.color; ctx.fill();
+      // Label
+      ctx.fillStyle=traj.color;
+      ctx.font='bold 11px monospace';
+      ctx.fillText(traj.label, lx-10, ground-10);
+    }
+
+    // Animated ball
+    if(ti===0&&animProgress<Infinity&&drawLimit>0){
+      const pi=Math.min(Math.floor(drawLimit),pts.length-1);
+      const p=pts[pi];
+      const bx=launchX+p.x*scaleX, by=ground-p.y*scaleY;
+      ctx.beginPath(); ctx.arc(bx,by,7,0,Math.PI*2);
+      ctx.fillStyle='#fbbf24'; ctx.fill();
+      ctx.strokeStyle='#fff'; ctx.lineWidth=1.5; ctx.stroke();
+    }
+  });
+
+  // Max height dashed line for first traj
+  if(trajectories.length>0){
+    const mh=trajectories[0].maxH;
+    const ly=ground-mh*scaleY;
+    ctx.setLineDash([4,4]);
+    ctx.strokeStyle='rgba(255,255,255,0.2)';
+    ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(launchX,ly); ctx.lineTo(W-10,ly); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle='rgba(255,255,255,0.4)';
+    ctx.font='10px monospace';
+    ctx.fillText(`H=${trajectories[0].maxH}m`, W-80, ly-3);
+  }
+
+  drawCatapult(ctx, W, H, launchX);
+
+  // Range vs angle graph overlay (small)
+  if(showGraph) drawGraph(ctx, W, H, launchX);
+}
+
+function drawCatapult(ctx, W, H, lx=60){
+  // Simple catapult icon
+  const ground=H-30;
+  ctx.fillStyle='#7c5c2a';
+  ctx.fillRect(lx-25, ground-15, 50, 15); // body
+  ctx.fillStyle='#5a3e1a';
+  ctx.fillRect(lx-30, ground-5, 8, 5); ctx.fillRect(lx+22, ground-5, 8, 5); // wheels
+  // Arm
+  const armAngle=(angle||45)*Math.PI/180;
+  ctx.strokeStyle='#a0763a'; ctx.lineWidth=4;
+  ctx.beginPath();
+  ctx.moveTo(lx-5, ground-12);
+  ctx.lineTo(lx-5+40*Math.cos(armAngle), ground-12-40*Math.sin(armAngle));
+  ctx.stroke();
+  // Ball in cup
+  ctx.beginPath();
+  ctx.arc(lx-5+40*Math.cos(armAngle), ground-12-40*Math.sin(armAngle), 6, 0, Math.PI*2);
+  ctx.fillStyle='#888'; ctx.fill();
+}
+
+function drawGraph(ctx, W, H, launchX){
+  const gW=160, gH=100;
+  const gx=W-gW-10, gy=10;
+  ctx.fillStyle='rgba(0,0,0,0.7)';
+  ctx.fillRect(gx,gy,gW,gH);
+  ctx.strokeStyle='rgba(255,255,255,0.3)'; ctx.lineWidth=1;
+  ctx.strokeRect(gx,gy,gW,gH);
+  ctx.fillStyle='rgba(255,255,255,0.7)';
+  ctx.font='9px monospace'; ctx.fillText('Range vs Angle',gx+4,gy+12);
+
+  const angles=Array.from({length:18},(_,i)=>(i+1)*5);
+  const ranges=angles.map(a=>computeTrajectory(a,initV,mass,useDrag).range);
+  const maxR=Math.max(...ranges);
+  ctx.beginPath(); ctx.strokeStyle='#22d3ee'; ctx.lineWidth=1.5;
+  angles.forEach((a,i)=>{
+    const px=gx+4+(a/90)*(gW-8);
+    const py=gy+gH-4-(ranges[i]/maxR)*(gH-20);
+    if(i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+  });
+  ctx.stroke();
+  // Mark 45
+  const px=gx+4+(45/90)*(gW-8);
+  ctx.fillStyle='#fbbf24';
+  ctx.fillText('45°',px-8,gy+gH-2);
+  ctx.strokeStyle='rgba(251,191,36,0.5)'; ctx.lineWidth=1; ctx.setLineDash([2,2]);
+  ctx.beginPath(); ctx.moveTo(px,gy+14); ctx.lineTo(px,gy+gH-10); ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function updateStats(result){
+  const w=WEAPONS[weaponType];
+  document.getElementById('stats').innerHTML=`
+    <div class="grid grid-cols-2 gap-2 text-sm">
+      <div class="bg-gray-800 rounded-lg p-2"><div class="text-xs text-gray-400">Range</div><div class="font-bold text-yellow-300 text-lg">${escapeHtml(String(result.range))} m</div></div>
+      <div class="bg-gray-800 rounded-lg p-2"><div class="text-xs text-gray-400">Max Height</div><div class="font-bold text-blue-300 text-lg">${escapeHtml(String(result.maxH))} m</div></div>
+      <div class="bg-gray-800 rounded-lg p-2"><div class="text-xs text-gray-400">Flight Time</div><div class="font-bold text-green-300 text-lg">${escapeHtml(String(result.tof))} s</div></div>
+      <div class="bg-gray-800 rounded-lg p-2"><div class="text-xs text-gray-400">Weapon</div><div class="font-bold text-lg" style="color:${escapeHtml(w.color)}">${escapeHtml(w.name)}</div></div>
+    </div>`;
+}
+
+function setupCanvas(){
+  const canvas=document.getElementById('cvs');
+  const cont=canvas.parentElement;
+  const w=cont.clientWidth-4;
+  canvas.width=w; canvas.height=Math.round(Math.min(w*0.5,400));
+  drawAll();
+}
+window.addEventListener('resize',setupCanvas);
+</script>
+<div class="max-w-4xl mx-auto p-4">
+  <h1 class="text-2xl font-bold text-orange-300 mb-4">⚔️ Catapult Projectile Physics</h1>
+  <div class="bg-gray-900 rounded-2xl p-2 mb-4">
+    <canvas id="cvs" class="rounded-xl w-full block"></canvas>
+  </div>
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+    <div class="bg-gray-800 rounded-xl p-4 flex flex-col gap-3">
+      <div>
+        <label class="text-sm text-gray-400 mb-1 block">Weapon Type</label>
+        <div class="grid grid-cols-3 gap-1">
+          ${Object.entries(WEAPONS).map(([k,w])=>`
+            <button onclick="weaponType='${k}';angle=${w.defaultAngle};initV=${w.defaultV};mass=${w.defaultMass};document.getElementById('angleSlider').value=${w.defaultAngle};document.getElementById('velocitySlider').value=${w.defaultV};document.getElementById('massSlider').value=${w.defaultMass};document.getElementById('angleVal').textContent=${w.defaultAngle};document.getElementById('vVal').textContent=${w.defaultV};document.getElementById('mVal').textContent=${w.defaultMass};drawAll()"
+              class="py-2 px-2 rounded-lg text-sm font-semibold border-2 transition"
+              style="border-color:${w.color};color:${w.color}"
+            >${w.name}</button>`).join('')}
+        </div>
+      </div>
+      <div>
+        <label class="text-sm text-gray-400">Launch Angle: <span id="angleVal" class="text-yellow-300 font-bold">45</span>°</label>
+        <input type="range" id="angleSlider" min="1" max="89" value="45" oninput="angle=+this.value;document.getElementById('angleVal').textContent=angle" class="w-full accent-yellow-500">
+      </div>
+      <div>
+        <label class="text-sm text-gray-400">Initial Velocity: <span id="vVal" class="text-orange-300 font-bold">35</span> m/s</label>
+        <input type="range" id="velocitySlider" min="5" max="120" value="35" oninput="initV=+this.value;document.getElementById('vVal').textContent=initV" class="w-full accent-orange-500">
+      </div>
+      <div>
+        <label class="text-sm text-gray-400">Mass: <span id="mVal" class="text-blue-300 font-bold">5</span> kg</label>
+        <input type="range" id="massSlider" min="1" max="50" value="5" oninput="mass=+this.value;document.getElementById('mVal').textContent=mass" class="w-full accent-blue-500">
+      </div>
+      <div class="flex items-center gap-4 flex-wrap">
+        <label class="flex items-center gap-2 text-sm cursor-pointer">
+          <input type="checkbox" onchange="useDrag=this.checked" class="w-4 h-4">
+          Air Resistance
+        </label>
+        <label class="flex items-center gap-2 text-sm cursor-pointer">
+          <input type="checkbox" onchange="showGraph=this.checked;drawAll()" class="w-4 h-4">
+          Range Graph
+        </label>
+      </div>
+    </div>
+    <div class="flex flex-col gap-3">
+      <div class="flex gap-2 flex-wrap">
+        <button onclick="launch()" class="bg-orange-700 hover:bg-orange-600 px-5 py-2 rounded-xl font-bold flex-1">🚀 Launch!</button>
+        <button onclick="launchComparison()" class="bg-purple-700 hover:bg-purple-600 px-4 py-2 rounded-xl text-sm flex-1">Compare 5 Angles</button>
+      </div>
+      <div id="stats">
+        <div class="text-gray-500 text-sm text-center py-4">Press Launch to fire</div>
+      </div>
+      <div class="bg-gray-800/50 rounded-xl p-3 text-xs text-gray-400">
+        <div class="font-semibold text-gray-300 mb-1">Physics</div>
+        <div>x(t) = v₀cos(θ)·t</div>
+        <div>y(t) = v₀sin(θ)·t − ½g·t²</div>
+        <div>Range = v₀²sin(2θ)/g (no drag)</div>
+        <div class="mt-1">Drag uses Euler integration with F_d = ½ρC_dAv²</div>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+window.addEventListener('load',()=>{
+  angle=45;initV=35;mass=5;
+  setupCanvas();
+});
+</script>
+</body>
+</html>
